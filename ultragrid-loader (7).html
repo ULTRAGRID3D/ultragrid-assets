@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ULTRAGRID Loader</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #0F1012;
+    overflow: hidden;
+  }
+  #canvas-container {
+    width: 100vw;
+    height: 100vh;
+    position: relative;
+    cursor: default;
+  }
+  canvas { display: block; width: 100% !important; height: 100% !important; }
+
+  #controls {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: rgba(15, 16, 18, 0.92);
+    border: 1px solid rgba(217, 209, 199, 0.12);
+    border-radius: 10px;
+    padding: 16px 20px;
+    width: 250px;
+    font-family: 'Arial', sans-serif;
+    z-index: 100;
+    backdrop-filter: blur(10px);
+  }
+  #controls h3 {
+    font-size: 9px;
+    letter-spacing: 0.35em;
+    color: #FF7A3C;
+    text-transform: uppercase;
+    margin-bottom: 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid rgba(255,122,60,0.2);
+  }
+  .ctrl-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+    gap: 8px;
+  }
+  .ctrl-row label {
+    font-size: 10px;
+    color: rgba(217,209,199,0.6);
+    letter-spacing: 0.04em;
+    flex: 1;
+    white-space: nowrap;
+  }
+  .ctrl-row input[type=range] {
+    width: 90px;
+    accent-color: #FF7A3C;
+    cursor: pointer;
+  }
+  .ctrl-row span {
+    font-size: 9px;
+    color: #FF7A3C;
+    min-width: 32px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+</style>
+</head>
+<body>
+<div id="canvas-container"></div>
+
+<div id="controls">
+  <h3>ULTRAGRID — Controls</h3>
+  <div class="ctrl-row"><label>Scan Speed</label><input type="range" id="scanSpeed" min="0.1" max="5" step="0.1" value="1.2"><span id="scanSpeedVal">1.2</span></div>
+  <div class="ctrl-row"><label>Scan Intensity</label><input type="range" id="scanIntensity" min="0" max="4" step="0.05" value="2.0"><span id="scanIntensityVal">2.0</span></div>
+  <div class="ctrl-row"><label>Scan Width</label><input type="range" id="scanWidth" min="1" max="30" step="0.5" value="10"><span id="scanWidthVal">10</span></div>
+  <div class="ctrl-row"><label>Scan Color</label><input type="range" id="scanOrange" min="0" max="1" step="0.01" value="0.6"><span id="scanOrangeVal">0.6</span></div>
+  <div class="ctrl-row"><label>Breathe Amp</label><input type="range" id="breatheAmp" min="0" max="0.15" step="0.005" value="0.04"><span id="breatheAmpVal">0.04</span></div>
+  <div class="ctrl-row"><label>Mouse Sensitivity</label><input type="range" id="mouseSens" min="0" max="1" step="0.01" value="0.35"><span id="mouseSensVal">0.35</span></div>
+  <div class="ctrl-row"><label>Exposure</label><input type="range" id="exposure" min="0.5" max="3" step="0.05" value="1.5"><span id="exposureVal">1.5</span></div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+// ─── SCENE ─────────────────────────────────────────────────────────────────
+const container = document.getElementById('canvas-container');
+const renderer  = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.5;
+container.appendChild(renderer.domElement);
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(0, 0, 6);
+
+// ─── VERTEX SHADER ─────────────────────────────────────────────────────────
+// On garde un shader minimal — la texture baked fait tout le travail visuel
+// On ajoute juste l'effet de scan par dessus
+const vertexShader = `
+  varying vec3 vNormal;
+  varying vec3 vViewPosition;
+  varying vec3 vWorldPosition;
+  varying vec2 vUv;
+
+  void main() {
+    vUv            = uv;
+    vec4 worldPos  = modelMatrix * vec4(position, 1.0);
+    vWorldPosition = worldPos.xyz;
+    vec4 mvPos     = modelViewMatrix * vec4(position, 1.0);
+    vViewPosition  = -mvPos.xyz;
+    vNormal        = normalize(normalMatrix * normal);
+    gl_Position    = projectionMatrix * mvPos;
+  }
+`;
+
+// ─── FRAGMENT SHADER ───────────────────────────────────────────────────────
+const fragmentShader = `
+  uniform sampler2D uBakeTexture;
+  uniform float     uTime;
+  uniform float     uScanSpeed;
+  uniform float     uScanWidth;
+  uniform float     uScanIntensity;
+  uniform float     uScanOrange;
+  uniform float     uMouseX;
+  uniform float     uMouseY;
+
+  varying vec3 vNormal;
+  varying vec3 vViewPosition;
+  varying vec3 vWorldPosition;
+  varying vec2 vUv;
+
+  // Fresnel pour donner du brillant sur les bords au passage de la souris
+  float fresnelSchlick(float cosTheta, float F0) {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+  }
+
+  void main() {
+    vec3 N     = normalize(vNormal);
+    vec3 V     = normalize(vViewPosition);
+    float NdotV = max(dot(N, V), 0.0);
+
+    // ── Texture baked depuis Blender ──────────────────────────────────────
+    vec4 baked = texture2D(uBakeTexture, vUv);
+    vec3 color = baked.rgb;
+
+    // ── Fresnel dynamique avec la souris ──────────────────────────────────
+    // La position de la lumière virtuelle suit la souris
+    vec3 lightDir  = normalize(vec3(uMouseX * 2.0, uMouseY * 1.5, 2.5));
+    vec3 H         = normalize(lightDir + V);
+    float NdotH    = max(dot(N, H), 0.0);
+    float fresnel  = fresnelSchlick(NdotV, 0.7);
+    float specular = pow(NdotH, 32.0) * 0.4;
+
+    // Ajoute un subtil highlight qui suit la souris
+    vec3 highlight = vec3(0.95, 0.97, 1.0) * (fresnel * 0.15 + specular);
+    color += highlight;
+
+    // ── Effet scan dramatique ─────────────────────────────────────────────
+    float scanPhase = mod(uTime * uScanSpeed, 5.0);
+    float scanPos   = scanPhase - 1.2;
+    float dist      = vWorldPosition.y - scanPos;
+
+    // Bande fine + halo
+    float scanCore  = exp(-dist * dist * uScanWidth * 4.0);
+    float scanHalo  = exp(-dist * dist * uScanWidth * 0.3) * 0.2;
+    float scanTotal = (scanCore + scanHalo) * uScanIntensity;
+
+    // Couleur scan : orange → blanc selon uScanOrange
+    vec3 orange    = vec3(1.0, 0.478, 0.235);
+    vec3 scanColor = mix(vec3(1.0, 0.97, 0.92), orange, uScanOrange);
+    color += scanColor * scanTotal;
+
+    // Tone mapping léger
+    color = color / (color + vec3(0.6));
+    color = pow(color, vec3(0.95));
+
+    gl_FragColor = vec4(color, 1.0);
+  }
+`;
+
+// ─── LOAD BAKE TEXTURE ─────────────────────────────────────────────────────
+const textureLoader = new THREE.TextureLoader();
+const bakeTexture   = textureLoader.load(
+  'https://raw.githubusercontent.com/ULTRAGRID3D/ultragrid-assets/main/Logo_Bake.png'
+);
+bakeTexture.flipY = false; // important pour GLB
+
+// ─── MATERIAL ──────────────────────────────────────────────────────────────
+const material = new THREE.ShaderMaterial({
+  vertexShader,
+  fragmentShader,
+  uniforms: {
+    uBakeTexture:   { value: bakeTexture },
+    uTime:          { value: 0 },
+    uScanSpeed:     { value: 1.2 },
+    uScanWidth:     { value: 10.0 },
+    uScanIntensity: { value: 2.0 },
+    uScanOrange:    { value: 0.6 },
+    uMouseX:        { value: 0 },
+    uMouseY:        { value: 0 },
+  }
+});
+
+// ─── LOAD GLB ──────────────────────────────────────────────────────────────
+let logoMesh    = null;
+let targetRotX  = 0, targetRotY = 0;
+let currentRotX = 0, currentRotY = 0;
+
+const loader = new GLTFLoader();
+loader.load(
+  'https://raw.githubusercontent.com/ULTRAGRID3D/ultragrid-assets/main/Loader_Logo_V3.glb',
+  (gltf) => {
+    const model = gltf.scene;
+    model.traverse((child) => {
+      if (child.isMesh) child.material = material;
+    });
+    const box    = new THREE.Box3().setFromObject(model);
+    const center = box.getCenter(new THREE.Vector3());
+    const size   = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    model.position.sub(center.multiplyScalar(2.8 / maxDim));
+    model.scale.setScalar(2.8 / maxDim);
+    scene.add(model);
+    logoMesh = model;
+  },
+  undefined,
+  (err) => console.error('Erreur GLB:', err)
+);
+
+// ─── MOUSE ─────────────────────────────────────────────────────────────────
+let sens = 0.35;
+window.addEventListener('mousemove', (e) => {
+  const mx =  (e.clientX / window.innerWidth  - 0.5) * 2;
+  const my = -(e.clientY / window.innerHeight - 0.5) * 2;
+  targetRotY = mx * sens;
+  targetRotX = my * sens * 0.5;
+  material.uniforms.uMouseX.value = mx;
+  material.uniforms.uMouseY.value = my;
+});
+window.addEventListener('touchmove', (e) => {
+  const t  = e.touches[0];
+  const mx =  (t.clientX / window.innerWidth  - 0.5) * 2;
+  const my = -(t.clientY / window.innerHeight - 0.5) * 2;
+  targetRotY = mx * sens;
+  targetRotX = my * sens * 0.5;
+});
+
+// ─── RESIZE ────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ─── CONTROLS ──────────────────────────────────────────────────────────────
+function bindSlider(id, valId, uniform, isRenderer) {
+  const slider = document.getElementById(id);
+  const valEl  = document.getElementById(valId);
+  slider.addEventListener('input', () => {
+    const v = parseFloat(slider.value);
+    valEl.textContent = v;
+    if (uniform && !isRenderer) material.uniforms[uniform].value = v;
+    if (id === 'mouseSens') sens = v;
+    if (id === 'exposure') renderer.toneMappingExposure = v;
+  });
+}
+bindSlider('scanSpeed',     'scanSpeedVal',     'uScanSpeed');
+bindSlider('scanIntensity', 'scanIntensityVal', 'uScanIntensity');
+bindSlider('scanWidth',     'scanWidthVal',     'uScanWidth');
+bindSlider('scanOrange',    'scanOrangeVal',    'uScanOrange');
+bindSlider('breatheAmp',    'breatheAmpVal',    null);
+bindSlider('mouseSens',     'mouseSensVal',     null);
+bindSlider('exposure',      'exposureVal',      null, true);
+
+// ─── ANIMATION ─────────────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const t = clock.getElapsedTime();
+  material.uniforms.uTime.value = t;
+
+  if (logoMesh) {
+    const breatheAmp = parseFloat(document.getElementById('breatheAmp').value);
+    logoMesh.position.y = Math.sin(t * 0.85) * breatheAmp;
+    const breatheRot    = Math.sin(t * 0.65) * 0.012;
+    currentRotX += (targetRotX - currentRotX) * 0.055;
+    currentRotY += (targetRotY - currentRotY) * 0.055;
+    logoMesh.rotation.x = currentRotX + breatheRot * 0.4;
+    logoMesh.rotation.y = currentRotY + breatheRot;
+  }
+
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
