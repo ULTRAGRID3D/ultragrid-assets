@@ -197,7 +197,7 @@ const fragmentShader = `
 // ─── LOAD BAKE TEXTURE ─────────────────────────────────────────────────────
 const textureLoader = new THREE.TextureLoader();
 const bakeTexture   = textureLoader.load(
-  'https://raw.githubusercontent.com/ULTRAGRID3D/ultragrid-assets/main/Logo_Bake.png'
+  'https://ultragrid3d.github.io/ultragrid-assets/Logo_Bake.png'
 );
 bakeTexture.flipY = false; // important pour GLB
 
@@ -224,7 +224,7 @@ let currentRotX = 0, currentRotY = 0;
 
 const loader = new GLTFLoader();
 loader.load(
-  'https://raw.githubusercontent.com/ULTRAGRID3D/ultragrid-assets/main/Loader_Logo_V3.glb',
+  'https://ultragrid3d.github.io/ultragrid-assets/Loader_Logo_V3.glb',
   (gltf) => {
     const model = gltf.scene;
     model.traverse((child) => {
